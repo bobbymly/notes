@@ -302,8 +302,6 @@ Empty set (0.00 sec)
 显示为空，说明profiles功能是关闭的。下面开启
 ```
 mysql> set profiling=1;
-
-Query OK, 0 rows affected (0.00 sec)
 ```
 执行任意查询语句
 ```
