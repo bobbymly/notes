@@ -321,7 +321,148 @@ Duration 字段表示查询所用时间
 Query 字段表示查询语句
 
 
+## 备份与恢复
+-----------------------
+### 备份恢复策略
+进行备份或恢复操作时需要考虑一些因素：
+
+* 确定要备份的表的存储引擎是事务型还是非事务型，两种不同的存储引擎备份方式在处理数据一致性方面是不太一样的。
+
+* 确定使用全备份还是增量备份。全备份的优点是备份保持最新备份，恢复的时候可以花费更少的时间；缺点是如果数据量大，将会花费很多的时间，并对系统造成较长时间的压力。增量备份相反，只需要备份每天的增量日志，备份时间少，对负载压力也小；缺点就是恢复的时候需要全备份加上次备份到故障前的所有日志，恢复时间长一些。
+
+* 可以考虑采用复制的方法来做异地备份，但不能代替备份，它对数据库的误操作也无能为力。
+
+* 要定期做备份，备份的周期要充分考虑系统可以承受的恢复时间。备份要在系统负载较小的时候进行
+
+* 确保 MySQL 打开 log-bin 选项，有了 binlog，MySQL 才可以在必要的时候做完整恢复，或基于时间点的恢复，或基于位置的恢复。
+
+* 经常做备份恢复测试，确保备份时有效的，是可以恢复的。
+
+### 逻辑备份和恢复
+-----------------------
+在 MySQL 中，逻辑备份的最大优点是对于各种存储引擎都可以用同样的方法来备份；而物理备份则不同，不同的存储引擎有着不同的备份方法，因此，对于不同存储引擎混合的数据库，逻辑备份会简单一点。
+
+1. 备份
+MySQL 中的逻辑备份是将数据库中的数据备份为一个文本文件，备份的文件可以被查看和编辑。在 MySQL 中，可以使用 mysqldump 工具来完成逻辑备份：
+
+// 备份指定的数据库或者数据库中的某些表  
+```
+shell> mysqldump [options] db_name [tables]  
+```
+// 备份指定的一个或多个数据库  
+```
+shell> mysqldump [options] --database DB1 [DB2,DB3...]  
+```
+// 备份所有数据库  
+```
+shell> mysqldump [options] --all-database
+```
+如果没有指定数据库中的任何表，默认导出所有数据库中的所有表。
+
+***注意： 为了保证数据备份的一致性，myisam 存储引擎在备份时需要加上 -l 参数,表示将所有表加上读锁，在备份期间，所有表将只能读而不能进行数据更新。但是对于事务存储引擎来说，可以采用更好的选项 --single-transaction，此选项使得 innodb 存储引擎得到一个快照(snapshot)，使得备份的数据能够保证一致性。***
+
+2. 完全恢复
+
+mysqldump 的恢复也很简单，将备份作为输入执行即可：
+```
+mysql -uroot -p db_name < backfile
+```
+***注意，将备份恢复后数据并不完整，还需要将备份后执行的日志进行重做：***
+```
+mysqlbinlog binlog-file | mysql -uroot -p
+```
+
+3. 基于时间点恢复
+
+由于误操作，比如误删除了一张表，这时使用完全恢复时没有用的，因为日志里面还存在误操作的语句，我们需要的是恢复到误操作之前的状态，然后跳过误操作语句，再恢复后面执行的语句，完成恢复。这种恢复叫不完全恢复，在 MySQL 中，不完全恢复分为 基于时间点的恢复和基于位置的恢复。 基于时间点恢复的操作步骤：
+
+(1) 如果是上午 10 点发生了误操作，可以用以下语句用备份和 binlog 将数据恢复到故障前：
+```
+shell>mysqlbinlog --stop-date="2017-09-30 9:59:59" /data/mysql/mysql-bin.123456 | mysql -uroot -ppassword
+```
+(2) 跳过故障时的时间点，继续执行后面的 binlog，完成恢复。
+```
+shell>mysqlbinlog --start-date="2017-09-30 10:01:00" /data/mysql/mysql-bin.123456 | mysql -uroot -ppassword
+```
+4. 基于位置恢复
+
+和基于时间点的恢复类似，但是更精确，因为同一个时间点可能有很多条 sql 语句同时执行。恢复的操作步骤如下：
+
+(1) 在 shell 下执行命令：
+```
+shell>mysqlbinlog --start-date="2017-09-30 9:59:59" --stop-date="2017-09-30 10:01:00" /data/mysql/mysql-bin.123456 > /tmp/mysql_restore.sql
+```
+该命令将在 /tmp 目录创建小的文本文件，编辑此文件，知道出错语句前后的位置号，例如前后位置号分别为 368312 和 368315。
+
+(2) 恢复了以前的备份文件后，应从命令行输入下面的内容：
+```
+shell>mysqlbinlog --stop-position="368312" /data/mysql/mysql-bin.123456 | mysql -uroot -ppassword  
+shell>mysqlbinlog --start-position="368315" /data/mysql/mysql-bin.123456 | mysql -uroot -ppassword 
+```
+上面的第一行将恢复到停止位置为止的所有事务。下一行将恢复从给定的起始位置直到二进制日志结束的所有事务。因为 mysqlbinlog 的输出包括每个 sql 语句记录之前的 set timestamp 语句，因此恢复的数据和相关的 mysql 日志将反应事务执行的原时间。
+
+
+### 物理备份和恢复
+物理备份又分为冷备份和热备份两种，和逻辑备份相比，它的最大优点是备份和恢复的速度更快，因为物理备份的原理都是基于文件的 cp。
+
+1. 冷备份
+冷备份其实就是停掉数据库服务，cp 数据文件的方法。(基本不考虑这种方法)
+
+2. 热备份
+在 MySQL 中，对于不同的存储引擎热备份的方法也有所不同。
+
+(1) myisam 存储引擎
+
+> myisam 存储引擎的热备份有很多方法，本质其实就是将要备份的表加读锁，然后再 cp 数据文件到备份目录。常用的有以下两种方法：
+
+> 使用 mysqlhotcopy 工具
+
+>  mysqlhotcopy 是 MySQL 的一个自带的热备份工具  
+> shell> mysqlhotcopy db_name [/path/to/new_directory]
+
+> 手工锁表 copy
+
+> 在 mysqlhotcopy 使用不正常的情况下，可以用手工来做热备份
+
+> mysql>flush tables for read;
+
+> cp 数据文件到备份目录即可，
+
+(2) innodb 存储引擎
+
+使用第三方工具 ibbackup、xtrabackup、innobacupex
 
 
 
 
+
+### mysqldump工具
+1.导出所有数据库
+
+该命令会导出包括系统数据库在内的所有数据库
+
+> mysqldump -uroot -proot --all-databases >/tmp/all.sql
+
+2.导出db1、db2两个数据库的所有数据
+
+> mysqldump -uroot -proot --databases db1 db2 >/tmp/user.sql
+
+3.导出db1中的a1、a2表
+
+注意导出指定表只能针对一个数据库进行导出，且导出的内容中和导出数据库也不一样，导出指定表的导出文本中没有创建数据库的判断语句，只有删除表-创建表-导入数据
+
+> mysqldump -uroot -proot --databases db1 --tables a1 a2  >/tmp/db1.sql
+
+4.条件导出，导出db1表a1中id=1的数据
+
+如果多个表的条件相同可以一次性导出多个表
+
+字段是整形
+
+> mysqldump -uroot -proot --databases db1 --tables a1 --where='id=1'  >/tmp/a1.sql
+
+5.生成新的binlog文件,-F
+
+有时候会希望导出数据之后生成一个新的binlog文件,只需要加上-F参数即可
+
+> mysqldump -uroot -proot --databases db1 -F >/tmp/db1.sql
